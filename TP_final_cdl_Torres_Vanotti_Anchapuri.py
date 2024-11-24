@@ -8,8 +8,8 @@ import matplotlib.pyplot as plt
 from inline_sql import sql,sql_val
 
 #%% Importamos las bases de datos
-#Emi "C:\\Users\\emili\\OneDrive\\Desktop\\Tp_final_cld\\"
-carpeta=("C:\\Users\\emili\\OneDrive\\Desktop\\Tp_final_cld\\")
+#Emi ""C:\\Users\\emili\\OneDrive\\Desktop\\datos_tp_final_cdl\\""
+carpeta=("C:\\Users\\emili\\OneDrive\\Desktop\\datos_tp_final_cdl\\")
 maestro_pozos=pd.read_csv(carpeta+"capitulo-iv-pozos.csv")
 pozos_no_convencional=pd.read_csv(carpeta+"produccin-de-pozos-de-gas-y-petrleo-no-convencional.csv")
 produccion_2024=pd.read_csv(carpeta+"produccin-de-pozos-de-gas-y-petrleo-2024.csv")
