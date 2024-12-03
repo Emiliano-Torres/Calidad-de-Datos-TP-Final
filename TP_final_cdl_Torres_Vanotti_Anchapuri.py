@@ -53,7 +53,8 @@ df_provincias.to_excel('df_provincias.xlsx')
 #%%Separemos las coordenas del string para accederlas mas facil
 
 def separador_de_coordendas(dataframe):
-    dataframe["geojson"]=dataframe["geojson"].apply(loads)
+    import json
+    dataframe["geojson"]=dataframe["geojson"].apply(json.loads)
     latitud=[]
     longitud=[]
     for index, _ in dataframe.iterrows():
@@ -63,7 +64,7 @@ def separador_de_coordendas(dataframe):
     
     coordenadas=pd.DataFrame({"latitud":latitud,"longitud":longitud})
 
-    dataframe.drop("geojson",axis=1,inplace=True)
+    #dataframe.drop("geojson",axis=1,inplace=True)
 
     dataframe=pd.concat([dataframe.reset_index(drop=True),coordenadas.reset_index(drop=True)],axis=1)
     return dataframe
@@ -212,6 +213,8 @@ plt.show()
 
 
 #%% esta bien ubicadas las cuencas?
+import json
+from shapely.geometry import shape
 info_cuencas=pd.read_csv(carpeta+"exploracin-hidrocarburos-cuencas-sedimentarias.csv")
 info_cuencas.iloc[17,0]="AUSTRAL"
 info_cuencas.iloc[20,0]="GENERAL LEVALLE"
@@ -220,18 +223,14 @@ info_cuencas.iloc[2,0]="LOS BOLSONES"
 cuencas=sql^"""SELECT DISTINCT cuenca FROM maestro_pozos"""
 info_cuencas=sql^"""SELECT DISTINCT c.cuenca, tipo ,geojson FROM cuencas AS c 
                    INNER JOIN info_cuencas AS i ON i.cuenca=c.cuenca"""
+info_cuencas["geojson"]=info_cuencas["geojson"].apply(json.loads)
+info_cuencas["geojson"]=info_cuencas["geojson"].apply(shape)
+                   
 cuencasnull=sql^"""SELECT DISTINCT * FROM produccion_2024 WHERE cuenca IS NULL"""
 #%%
-import geopandas as gpd
-from shapely.geometry import Point
-maestro_pozos=separador_de_coordendas(maestro_pozos)
-correctamente_ubicado=[]
-for i in range(len(maestro_pozos)):
-    fila=maestro_pozos.iloc[i,:]
-    punto = Point(maestro_pozos["latitud"],maestro_pozos["longitud"])  # Ejemplo: Córdoba, Argentina
-    region= info_cuencas[:,2]
-# Verificar si el punto está dentro de alguna región del GeoJSON
-    esta_dentro = region.contains(punto).any()
+
+
+
 #%%  COSAS FRANQUITO
 import pandas as pd
 from inline_sql import sql, sql_val
@@ -322,18 +321,166 @@ no_conv_ids_prod_cero = sql^ """ SELECT idpozo, COUNT(*) AS veces
                          GROUP BY idpozo
                          HAVING COUNT(*) = 10;
                      """                                                           
+#%% los pozos estan en su respectiva provincia
+import pandas as pd
+from shapely.geometry import shape, Point
+import json
+esta_adentro=[]
+maestro_pozos=separador_de_coordendas(maestro_pozos)
+#%%
+esta_adentro=[]
+for index, row in  maestro_pozos.iterrows():
+    for indice, fila in info_cuencas.iterrows():
+        if row[8]==fila[0]: #Compara las cuencas
+            esta_adentro.append(fila[2].contains(Point(row[27],row[26])))           
+#%%
+esta_adentro.count(False)
+#hay 76 pozos que no estan en la cuenca que dicen estar
+#%% problema provincia
+info_provincias=pd.read_csv(carpeta+"provincia.csv")
+#%%
+from shapely.wkt import loads
+id_geo=sql^"""SELECT DISTINCT idpozo,provincia,latitud,longitud FROM maestro_pozos"""
+esta_adentro=[]
+provincia_poligono=sql^"""SELECT DISTINCT nam,geom FROM info_provincias"""
+provincia_poligono["geom"]=provincia_poligono["geom"].apply(loads)
+prov_pol={}
+for index,row in provincia_poligono.iterrows():
+    if row[0]=="Río Negro":
+        prov_pol["Rio Negro"]=row[1]
+    elif row[0]=='Tierra del Fuego, Antártida e Islas del Atlántico Sur':
+        prov_pol['Tierra del Fuego']=row[1]        
+    else:   
+        prov_pol[row[0]]=row[1]
+        
+
+#%%
+for index, row in  id_geo.iterrows():
+    if row[1]!="Estado Nacional":
+        esta_adentro.append(prov_pol[row[1]].contains(Point(row[3],row[2]))) 
+# 550 fuera de provincia, de las cuales 477 estan mal, ya que 73 son Estado nacional
+#80 son repeticiones bah 40
+#%%
+no_conv_ids_prod_cero = sql^ """ SELECT COUNT(provincia) AS veces
+                         FROM maestro_pozos
+                         WHere provincia='Estado Nacional'"""
+
+#%%
+cantidad_provincias_repetidas=sql^ """SELECT DISTINCT geojson, count(DISTINCT provincia) as veces FROM maestro_pozos
+                                      GROUP BY geojson HAVING veces>1   """
+
+#%%
+
+pozos=sql^ """SELECT idpozo, provincia,latitud,longitud FROM maestro_pozos AS m 
+         INNER JOIN cantidad_provincias_repetidas AS c ON c.geojson = m.geojson"""
+
+#%%
+for index, row in pozos.iterrows():
+    print(row[0],row[1],prov_pol[row[1]].contains(Point(row[3],row[2])))
+
+#%% 
+geojson_repetidos_en_cuencas=sql^"""SELECT DISTINCT geojson, count( DISTINCT cuenca) as veces FROM maestro_pozos
+                                    GROUP BY geojson """
+                                    
+#%% K gradiente discreto
+#produccion Dataframe
+#petroleo o gas
+#K_u
+#K_l
+def k_discrete_gradient(produccion,tipo,k_u,k_l):
+    #ordena el dataset
+    produccion=sql^"""SELECT * FROM produccion ORDER BY idpozo ASC, mes ASC, Anio Desc"""
+    #ids=((sql^"""SELECT DISTINCT idpozo FROM producción""")["idpozo"]).to_list()
+    casos_anomalos={}
+    lista_casos=[]
+    gradiente_previo=0
+    primer_mes_id=True
+    for i in range(len(produccion)-1):
+        if produccion["idpozo"][i]==produccion["idpozo"][i+1] and primer_mes_id:
+            gradiente_previo=abs(produccion[tipo][i+1]-produccion[tipo][i])
+            lista_casos.append((False,"primer_mes")) #los primeros casos no pueden ser anomalos
+            primer_mes_id=False
+        elif produccion["idpozo"][i]==produccion["idpozo"][i+1] and not( primer_mes_id): #tratamiento adentro de cada id
+            
+            if produccion[tipo][i]-gradiente_previo*k_l>produccion[tipo][i+1]:
+                lista_casos.append((True,"Cayó más de lo esperado"))
+                gradiente_previo=abs(produccion[tipo][i+1]-produccion[tipo][i])
+                
+            elif produccion[tipo][i]+gradiente_previo*k_u<produccion[tipo][i+1]:
+                lista_casos.append((True,"Produjo más de lo esperado"))
+                gradiente_previo=abs(produccion[tipo][i+1]-produccion[tipo][i])
+                
+            else:
+                lista_casos.append((False,"Produccion normal"))
+                gradiente_previo=abs(produccion[tipo][i+1]-produccion[tipo][i])
+        else:
+           
+            #guarda los datos
+            casos_anomalos[(produccion["idpozo"][i],produccion["anio"][i])]=lista_casos
+            #reinicia
+            lista_casos=[]
+            primer_mes_id=True
+
+    return casos_anomalos
+
+#a=k_discrete_gradient(produccion_2024,"prod_gas",3,3)
+b=k_discrete_gradient(produccion_2024,"prod_gas", 3, 3)
+#%%
+
+"""cont_casos_normales=0
+cont_mayor_prod=0
+cont_menor_prod=0
+for i in a.keys():
+    for j in range(len(a[i])):
+        if a[i][j][0]==False:
+            cont_casos_normales+=1
+        elif a[i][j][1]=="Cayó más de lo esperado":
+            cont_menor_prod+=1
+        else:
+             cont_mayor_prod+=1
+total=cont_casos_normales+cont_mayor_prod+cont_menor_prod
+print("casos normales= ",cont_casos_normales/total*100)
+print("Mayor prod= ",cont_mayor_prod/total*100)
+print("Menor prod= ",cont_menor_prod/total*100)"""
+cont_casos_normales=0
+cont_mayor_prod=0
+cont_menor_prod=0
+for i in b.keys():
+    for j in range(len(b[i])):
+        if b[i][j][0]==False:
+            cont_casos_normales+=1
+        elif b[i][j][1]=="Cayó más de lo esperado":
+            cont_menor_prod+=1
+        else:
+             cont_mayor_prod+=1
+total=cont_casos_normales+cont_mayor_prod+cont_menor_prod
+print("casos normales= ",cont_casos_normales/total*100)
+print("Mayor prod= ",cont_mayor_prod/total*100)
+print("Menor prod= ",cont_menor_prod/total*100)
+
+
+#scoring
+#me dice anomalo bueno 2 punto
+#si produjo un mes que no escavado el pozo 7
+#Si produjo negativo 10 puntos
+#Si sumaste mas de 7 sos anomalo
+
+
+
+
+#%% scoring
+
+
+
+
+
+
+
+
+
+
+
     
-
-
-
-
-
-
-
-
-
-
-
 
 
 
