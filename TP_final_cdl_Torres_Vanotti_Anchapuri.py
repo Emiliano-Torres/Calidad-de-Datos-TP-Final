@@ -383,48 +383,60 @@ geojson_repetidos_en_cuencas=sql^"""SELECT DISTINCT geojson, count( DISTINCT cue
                                     GROUP BY geojson """
                                     
 #%% K gradiente discreto
-#produccion Dataframe
-#petroleo o gas
-#K_u
-#K_l
-def k_discrete_gradient(produccion,tipo,k_u,k_l):
+#produccion: Dataframe con los datos de producción
+#tipo: petroleo o gas
+#K_u: Factor superior
+#K_l: Factor inferior
+def k_metrica_gradiente_discreto(produccion,tipo,k_u,k_l):
     #ordena el dataset
     produccion=sql^"""SELECT * FROM produccion ORDER BY idpozo ASC, mes ASC, Anio Desc"""
-    #ids=((sql^"""SELECT DISTINCT idpozo FROM producción""")["idpozo"]).to_list()
-    casos_anomalos={}
-    lista_casos=[]
+    id_anomalo=[]
+    mes_anomalo=[]
+    descripcion=[]
     gradiente_previo=0
     primer_mes_id=True
     for i in range(len(produccion)-1):
+        
         if produccion["idpozo"][i]==produccion["idpozo"][i+1] and primer_mes_id:
             gradiente_previo=abs(produccion[tipo][i+1]-produccion[tipo][i])
-            lista_casos.append((False,"primer_mes")) #los primeros casos no pueden ser anomalos
             primer_mes_id=False
         elif produccion["idpozo"][i]==produccion["idpozo"][i+1] and not( primer_mes_id): #tratamiento adentro de cada id
             
             if produccion[tipo][i]-gradiente_previo*k_l>produccion[tipo][i+1]:
-                lista_casos.append((True,"Cayó más de lo esperado"))
+                id_anomalo.append(produccion["idpozo"][i])
+                mes_anomalo.append(produccion["mes"][i])
+                if tipo=="prod_pet": 
+                    descripcion.append(f"En el año: {produccion['anio'][i]} y en mes: {produccion['mes'][i]} se produjo menos petróleo de lo esperado")
+                else:
+                    descripcion.append(f"En el año: {produccion['anio'][i]} y en mes: {produccion['mes'][i]} se produjo menos gas de lo esperado")
                 gradiente_previo=abs(produccion[tipo][i+1]-produccion[tipo][i])
                 
             elif produccion[tipo][i]+gradiente_previo*k_u<produccion[tipo][i+1]:
-                lista_casos.append((True,"Produjo más de lo esperado"))
+                id_anomalo.append(produccion["idpozo"][i])
+                if tipo=="prod_pet": 
+                    descripcion.append(f"En el año: {produccion['anio'][i]} y en mes: {produccion['mes'][i]} se produjo más petróleo de lo esperado")
+                else:
+                    descripcion.append(f"En el año: {produccion['anio'][i]} y en mes: {produccion['mes'][i]} se produjo más  gas de lo esperado")
                 gradiente_previo=abs(produccion[tipo][i+1]-produccion[tipo][i])
                 
-            else:
-                lista_casos.append((False,"Produccion normal"))
-                gradiente_previo=abs(produccion[tipo][i+1]-produccion[tipo][i])
         else:
-           
-            #guarda los datos
-            casos_anomalos[(produccion["idpozo"][i],produccion["anio"][i])]=lista_casos
-            #reinicia
-            lista_casos=[]
             primer_mes_id=True
+    casos_anomalos={"idpozo":id_anomalo,"descripcion":descripcion} 
+    casos_anomalos=pd.DataFrame(casos_anomalos)
+    return casos_anomalos #Dataframe con los casos anomalos almacenados por pozo y año
 
-    return casos_anomalos
-
-#a=k_discrete_gradient(produccion_2024,"prod_gas",3,3)
-b=k_discrete_gradient(produccion_2024,"prod_gas", 3, 3)
+produccion_conv_pet_anomala= k_metrica_gradiente_discreto(produccion_2024,"prod_pet",3,3)
+#%%
+produccion_conv_gas_anomala= k_metrica_gradiente_discreto(produccion_2024,"prod_gas",3,3)
+#%%
+pozos_no_convencional=sql^"""SELECT * FROM pozos_no_convencional WHERE anio=2024"""
+produccion_no_conv_pet_anomala= k_metrica_gradiente_discreto(pozos_no_convencional,"prod_pet",3,3)
+#%%
+produccion_no_conv_gas_anomala= k_metrica_gradiente_discreto(pozos_no_convencional,"prod_gas",3,3)
+#%%
+coso_final=pd.concat([produccion_conv_pet_anomala,produccion_conv_gas_anomala,produccion_no_conv_pet_anomala,produccion_no_conv_gas_anomala])
+#%%
+coso_final.to_csv("casos_anomalos_de_produccion.csv")
 #%%
 
 """cont_casos_normales=0
@@ -469,15 +481,125 @@ print("Menor prod= ",cont_menor_prod/total*100)
 
 
 #%% scoring
+import json
+from shapely.geometry import shape
+info_cuencas=pd.read_csv(carpeta+"exploracin-hidrocarburos-cuencas-sedimentarias.csv")
+info_cuencas.iloc[17,0]="AUSTRAL"
+info_cuencas.iloc[20,0]="GENERAL LEVALLE"
+info_cuencas.iloc[2,0]="LOS BOLSONES"
 
+cuencas=sql^"""SELECT DISTINCT cuenca FROM maestro_pozos"""
+info_cuencas=sql^"""SELECT DISTINCT c.cuenca, tipo ,geojson FROM cuencas AS c 
+                   INNER JOIN info_cuencas AS i ON i.cuenca=c.cuenca"""
+info_cuencas["geojson"]=info_cuencas["geojson"].apply(json.loads)
+info_cuencas["geojson"]=info_cuencas["geojson"].apply(shape)
+#%%                   
+info_provincias=pd.read_csv(carpeta+"provincia.csv")
+maestro_pozos=separador_de_coordendas(maestro_pozos)
+#%%
+from shapely.wkt import loads
+from shapely.geometry import shape, Point
+id_geo=sql^"""SELECT DISTINCT idpozo,provincia,latitud,longitud FROM maestro_pozos"""
+id_equivocado=[]
+descripcion=[]
+provincia_poligono=sql^"""SELECT DISTINCT nam,geom FROM info_provincias"""
+provincia_poligono["geom"]=provincia_poligono["geom"].apply(loads)
+prov_pol={}
+for index,row in provincia_poligono.iterrows():
+    if row[0]=="Río Negro":
+        prov_pol["Rio Negro"]=row[1]
+    elif row[0]=='Tierra del Fuego, Antártida e Islas del Atlántico Sur':
+        prov_pol['Tierra del Fuego']=row[1]        
+    else:   
+        prov_pol[row[0]]=row[1]
+#%%
+id_equivocado=[]
+descripcion=[]
+for i in range(len(id_geo)):
+    if id_geo["provincia"][i]!="Estado Nacional":
+        if not((prov_pol[id_geo["provincia"][i]]).contains(Point(id_geo["longitud"][i],id_geo["latitud"][i]))):
+            id_equivocado.append(id_geo["idpozo"][i])
+            descripcion.append("Provincia incosistentes con el geojson")
+#%%
+provincias_anomalas=pd.DataFrame({"idpozo":id_equivocado,"descripcion":descripcion})
+#%%
+provincias_anomalas.to_csv("Provincias_anomalas.csv")
+#%%
+datos_2023=pd.read_csv("C:\\Users\\emili\\OneDrive\\Desktop\\datos_tp_final_cdl\\produccin-de-pozos-de-gas-y-petrleo-2023.csv")
+#%%
+ids_viejos=sql^"""SELECT DISTINCT idpozo FROM datos_2023
+                INTERSECT
+                 SELECT DISTINCT idpozo FROM produccion_2024"""
+#%%
+produccion_diciembre_2023=sql^"""SELECT DISTINCT idpozo,prod_pet,prod_gas,anio,mes FROM datos_2023
+                                 WHERE idpozo IN (SELECT idpozo FROM ids_viejos) AND mes=12"""
 
-
-
-
-
-
-
-
+#%%
+def k_metrica_gradiente_discreto_ampliado(produccion,tipo,k_u,k_l):
+    #ordena el dataset
+    ids_viejos=sql^"""SELECT DISTINCT idpozo FROM datos_2023
+                      INTERSECT
+                      SELECT DISTINCT idpozo FROM produccion"""
+    datos_nov_dic_2023=sql^"""SELECT DISTINCT d.idpozo,d.prod_pet,d.prod_gas,d.anio,d.mes FROM datos_2023 as d
+                          WHERE 
+                          d.idpozo IN (SELECT idpozo FROM ids_viejos) AND mes=12 """
+                              
+    produccion=sql^"""SELECT idpozo,prod_pet,prod_gas,anio,mes FROM produccion 
+                      UNION
+                      SELECT * FROM datos_nov_dic_2023
+                      """
+    produccion=sql^"""SELECT idpozo,prod_pet,prod_gas,anio,mes FROM produccion ORDER BY idpozo ASC, Anio ASC, mes ASC"""
+    
+    id_anomalo=[]
+    tipo_anomalo=[]
+    mes_anomalo=[]
+    descripcion=[]
+    gradiente_previo=0
+    primer_mes_id=True
+    for i in range(len(produccion)-1):
+        
+        if produccion["idpozo"][i]==produccion["idpozo"][i+1] and primer_mes_id:
+            gradiente_previo=abs(produccion[tipo][i+1]-produccion[tipo][i])
+            primer_mes_id=False
+        elif produccion["idpozo"][i]==produccion["idpozo"][i+1] and not( primer_mes_id): #tratamiento adentro de cada id
+            
+            if produccion[tipo][i]-gradiente_previo*k_l>produccion[tipo][i+1]:
+                id_anomalo.append(produccion["idpozo"][i])
+                mes_anomalo.append(produccion["mes"][i])
+                if tipo=="prod_pet": 
+                    descripcion.append(f"En el año: {produccion['anio'][i]} y en mes: {produccion['mes'][i]} se produjo menos petróleo de lo esperado")
+                else:
+                    descripcion.append(f"En el año: {produccion['anio'][i]} y en mes: {produccion['mes'][i]} se produjo menos gas de lo esperado")
+                gradiente_previo=abs(produccion[tipo][i+1]-produccion[tipo][i])
+                
+            elif produccion[tipo][i]+gradiente_previo*k_u<produccion[tipo][i+1]:
+                id_anomalo.append(produccion["idpozo"][i])
+                if tipo=="prod_pet": 
+                    descripcion.append(f"En el año: {produccion['anio'][i]} y en mes: {produccion['mes'][i]} se produjo más petróleo de lo esperado")
+                else:
+                    descripcion.append(f"En el año: {produccion['anio'][i]} y en mes: {produccion['mes'][i]} se produjo más  gas de lo esperado")
+                gradiente_previo=abs(produccion[tipo][i+1]-produccion[tipo][i])
+                
+        else:
+            primer_mes_id=True
+    casos_anomalos={"idpozo":id_anomalo,"descripcion":descripcion} 
+    casos_anomalos=pd.DataFrame(casos_anomalos)
+    return casos_anomalos #Dataframe con los casos anomalos almacenados por pozo y año
+#%%
+produccion_conv_pet_anomala= k_metrica_gradiente_discreto_ampliado(produccion_2024,"prod_pet",3,3)
+#%%
+produccion_conv_gas_anomala= k_metrica_gradiente_discreto_ampliado(produccion_2024,"prod_gas",3,3)
+#%%
+pozos_no_convencional=sql^"""SELECT * FROM pozos_no_convencional WHERE anio=2024"""
+produccion_no_conv_pet_anomala= k_metrica_gradiente_discreto_ampliado(pozos_no_convencional,"prod_pet",3,3)
+#%%
+produccion_no_conv_gas_anomala= k_metrica_gradiente_discreto_ampliado(pozos_no_convencional,"prod_gas",3,3)
+#%%
+coso_final=pd.concat([produccion_conv_pet_anomala,produccion_conv_gas_anomala,produccion_no_conv_pet_anomala,produccion_no_conv_gas_anomala])
+#%%
+coso_final.to_csv("casos_anomalos_de_produccion.csv")
+#%%
+traka=pd.read_csv("C:\\Users\\emili\\OneDrive\\Desktop\\casos_anomalos_de_produccion.csv")
 
 
     
